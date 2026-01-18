@@ -1,7 +1,12 @@
 FROM node:18-alpine
 
-# 安装 Python 和其他构建工具
-RUN apk add --no-cache python3 py3-pip git
+# 安装 Python、SSH 客户端和其他构建工具
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    git \
+    openssh-client \
+    socat
 
 # 设置工作目录
 WORKDIR /app
@@ -26,6 +31,10 @@ RUN npm prune --production
 
 # 设置环境变量，告知应用在 Docker 中运行
 ENV IS_DOCKER=true
+
+# 创建 SSH 目录
+RUN mkdir -p /root/.ssh && \
+    chmod 700 /root/.ssh
 
 # 运行启动脚本
 CMD ["python3", "bridging_ssh_mcp.py"] 

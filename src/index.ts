@@ -21,13 +21,13 @@ async function main() {
 
   // 处理进程退出
   process.on('SIGINT', async () => {
-    console.log('正在关闭SSH MCP服务...');
+    console.error('正在关闭SSH MCP服务...');
     await sshMCP.close();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
-    console.log('正在关闭SSH MCP服务...');
+    console.error('正在关闭SSH MCP服务...');
     await sshMCP.close();
     process.exit(0);
   });
@@ -43,7 +43,7 @@ async function main() {
     // 不退出进程，保持SSH服务运行
   });
 
-  console.log('SSH MCP服务已启动');
+  console.error('SSH MCP服务已启动');
 }
 
 // 启动应用

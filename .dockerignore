@@ -1,5 +1,11 @@
 node_modules
+dist
 .git
 .gitignore
-Dockerfile
-changes.txt 
+*.md
+.env
+.mcp-ssh
+*.log
+.DS_Store
+.vscode
+.idea

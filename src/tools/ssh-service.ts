@@ -404,16 +404,36 @@ export class SSHService {
       const ssh = new NodeSSH();
       
       // 连接选项
-      const connectOptions = {
+      const connectOptions: any = {
         host: config.host,
         port: config.port || parseInt(process.env.DEFAULT_SSH_PORT || '22'),
         username: config.username,
-        password: config.password,
-        privateKey: config.privateKey,
-        passphrase: config.passphrase,
         keepaliveInterval: config.keepaliveInterval || 60000,
         readyTimeout: config.readyTimeout || parseInt(process.env.CONNECTION_TIMEOUT || '10000')
       };
+      
+      // 认证方式优先级：privateKey > password > SSH agent
+      if (config.privateKey) {
+        connectOptions.privateKey = config.privateKey;
+        if (config.passphrase) {
+          connectOptions.passphrase = config.passphrase;
+        }
+      } else if (config.password) {
+        connectOptions.password = config.password;
+      } else {
+        // 尝试使用 SSH agent（如果可用）
+        const sshAuthSock = process.env.SSH_AUTH_SOCK;
+        if (sshAuthSock && fs.existsSync(sshAuthSock)) {
+          // node-ssh 底层使用 ssh2，通过 agent 选项支持 SSH agent
+          // ssh2 的 agent 选项接受 socket 路径字符串
+          connectOptions.agent = sshAuthSock;
+          // 输出到 stderr，避免干扰 MCP 的 stdout JSON-RPC 通信
+          console.error(`使用 SSH agent 进行认证: ${sshAuthSock}`);
+        } else {
+          // 如果没有提供任何认证方式，抛出错误
+          throw new Error('未提供认证方式（私钥、密码或 SSH Agent）');
+        }
+      }
       
       // 连接
       await ssh.connect(connectOptions);
@@ -453,6 +473,22 @@ export class SSHService {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
     
+    // 如果已经在重连中，避免重复启动重连
+    if (connection.status === ConnectionStatus.RECONNECTING) {
+      console.error(`连接 ${connectionId} 已在重连中，跳过重复重连`);
+      return;
+    }
+    
+    // 清理旧的 SSH 客户端，释放内存
+    if (connection.client) {
+      try {
+        connection.client.dispose();
+      } catch (e) {
+        // 忽略清理错误
+      }
+      connection.client = undefined;
+    }
+    
     // 设置状态为重连中
     connection.status = ConnectionStatus.RECONNECTING;
     
@@ -461,34 +497,73 @@ export class SSHService {
     const reconnectDelay = config.reconnectDelay || 5000;
     
     let attempts = 0;
+    let reconnectTimer: NodeJS.Timeout | null = null;
     
     const attemptReconnect = async () => {
       attempts++;
       
+      // 检查连接是否还存在
+      const currentConnection = this.connections.get(connectionId);
+      if (!currentConnection) {
+        console.error(`连接 ${connectionId} 已删除，停止重连`);
+        return;
+      }
+      
       try {
-        // 尝试重连
-        await this.connect(config);
+        // 创建禁用自动重连的配置，避免无限循环
+        const reconnectConfig: SSHConnectionConfig = {
+          ...config,
+          reconnect: false,  // 禁用自动重连，避免循环
+          reconnectTries: 0  // 禁用重连尝试
+        };
+        
+        // 尝试重连（使用禁用重连的配置）
+        await this.connect(reconnectConfig, connection.name, false, connection.tags);
+        
+        // 重连成功后，恢复原始配置的 reconnect 设置
+        const reconnectedConnection = this.connections.get(connectionId);
+        if (reconnectedConnection) {
+          reconnectedConnection.config.reconnect = config.reconnect;
+          reconnectedConnection.config.reconnectTries = config.reconnectTries;
+          reconnectedConnection.config.reconnectDelay = config.reconnectDelay;
+        }
+        
         // 重连成功
-        console.log(`成功重新连接到 ${config.host}`);
+        console.error(`成功重新连接到 ${config.host}`);
       } catch (error) {
         // 重连失败
         console.error(`重连尝试 ${attempts}/${reconnectTries} 失败:`, error);
         
+        // 清理失败的连接对象，释放内存
+        const failedConnection = this.connections.get(connectionId);
+        if (failedConnection && failedConnection.client) {
+          try {
+            failedConnection.client.dispose();
+          } catch (e) {
+            // 忽略清理错误
+          }
+          failedConnection.client = undefined;
+        }
+        
         // 如果还有重连次数，继续尝试
         if (attempts < reconnectTries) {
-          setTimeout(attemptReconnect, reconnectDelay);
+          reconnectTimer = setTimeout(attemptReconnect, reconnectDelay);
         } else {
           // 重连次数耗尽，设置状态为错误
-          const failedConnection = this.connections.get(connectionId);
-          if (failedConnection) {
-            failedConnection.status = ConnectionStatus.ERROR;
+          const finalConnection = this.connections.get(connectionId);
+          if (finalConnection) {
+            finalConnection.status = ConnectionStatus.ERROR;
+            finalConnection.lastError = `重连失败，已尝试 ${attempts} 次`;
           }
         }
       }
     };
     
     // 开始第一次重连尝试
-    setTimeout(attemptReconnect, reconnectDelay);
+    reconnectTimer = setTimeout(attemptReconnect, reconnectDelay);
+    
+    // 存储定时器引用，以便在连接删除时清理
+    (connection as any).reconnectTimer = reconnectTimer;
   }
   
   // 断开连接
@@ -1233,6 +1308,14 @@ export class SSHService {
   public async deleteConnection(connectionId: string): Promise<boolean> {
     await this.ensureReady();
     
+    const connection = this.connections.get(connectionId);
+    
+    // 清理重连定时器
+    if (connection && (connection as any).reconnectTimer) {
+      clearTimeout((connection as any).reconnectTimer);
+      (connection as any).reconnectTimer = null;
+    }
+    
     // 断开连接
     await this.disconnect(connectionId);
     
@@ -1722,7 +1805,7 @@ export class SSHService {
       }
     }
     
-    console.log(`已清理完成的文件传输记录，当前剩余: ${this.fileTransfers.size}`);
+    console.error(`已清理完成的文件传输记录，当前剩余: ${this.fileTransfers.size}`);
   }
   
   // 清理不活跃的资源
@@ -1745,7 +1828,7 @@ export class SSHService {
       // 未来可以添加活动时间跟踪
     }
     
-    console.log(`已清理不活跃资源，当前终端会话: ${this.terminalSessions.size}, 隧道: ${this.tunnels.size}`);
+    console.error(`已清理不活跃资源，当前终端会话: ${this.terminalSessions.size}, 隧道: ${this.tunnels.size}`);
   }
   
   // 关闭服务
