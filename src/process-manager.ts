@@ -24,11 +24,22 @@ export class ProcessManager {
 
   private cleanup(): void {
     try {
-      if (fs.existsSync(LOCK_FILE)) {
-        const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
-        // 只清理自己的锁文件
-        if (lockData.instanceId === this.instanceId) {
-          fs.unlinkSync(LOCK_FILE);
+      const isDocker = process.env.IS_DOCKER === 'true';
+      
+      if (isDocker) {
+        // 在容器内：清理基于实例ID的唯一锁文件
+        const uniqueLockFile = `${LOCK_FILE}.${this.instanceId}`;
+        if (fs.existsSync(uniqueLockFile)) {
+          fs.unlinkSync(uniqueLockFile);
+        }
+      } else {
+        // 非容器环境：清理标准锁文件
+        if (fs.existsSync(LOCK_FILE)) {
+          const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
+          // 只清理自己的锁文件
+          if (lockData.instanceId === this.instanceId) {
+            fs.unlinkSync(LOCK_FILE);
+          }
         }
       }
     } catch (error) {
@@ -53,6 +64,10 @@ export class ProcessManager {
 
   public async checkAndCreateLock(): Promise<boolean> {
     try {
+      // 在容器内（IS_DOCKER=true）时，允许多个进程同时运行
+      // 只清理已不存在的进程的锁文件，不终止正在运行的进程
+      const isDocker = process.env.IS_DOCKER === 'true';
+      
       // 检查锁文件是否存在
       if (fs.existsSync(LOCK_FILE)) {
         const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
@@ -60,20 +75,36 @@ export class ProcessManager {
         try {
           // 检查进程是否还在运行
           process.kill(lockData.pid, 0);
-          console.error('发现已存在的MCP-SSH实例，正在终止旧进程...');
           
-          // 发送终止信号给旧进程
-          process.kill(lockData.pid, 'SIGTERM');
-          
-          // 等待旧进程退出
-          const exited = await this.waitForProcessExit(lockData.pid);
-          if (!exited) {
-            console.error('等待旧进程退出超时');
-            return false;
+          // 进程还在运行
+          if (isDocker) {
+            // 在容器内：允许多个进程同时运行
+            // 如果这是自己的旧锁文件，删除它；否则保留其他进程的锁文件
+            if (lockData.instanceId === this.instanceId) {
+              // 这是自己的旧锁文件，可以删除
+              fs.unlinkSync(LOCK_FILE);
+            } else {
+              // 其他进程的锁文件，在容器内允许多进程，直接创建新锁文件
+              // 使用唯一的锁文件名（基于实例ID）避免冲突
+              const uniqueLockFile = `${LOCK_FILE}.${this.instanceId}`;
+              fs.writeFileSync(uniqueLockFile, JSON.stringify({
+                pid: process.pid,
+                instanceId: this.instanceId,
+                timestamp: Date.now()
+              }));
+              return true;
+            }
+          } else {
+            // 非容器环境：终止旧进程（保持原有行为）
+            console.error('发现已存在的MCP-SSH实例，正在终止旧进程...');
+            process.kill(lockData.pid, 'SIGTERM');
+            const exited = await this.waitForProcessExit(lockData.pid);
+            if (!exited) {
+              console.error('等待旧进程退出超时');
+              return false;
+            }
+            fs.unlinkSync(LOCK_FILE);
           }
-          
-          // 删除旧的锁文件
-          fs.unlinkSync(LOCK_FILE);
         } catch (e) {
           // 进程不存在，删除旧的锁文件
           console.error('发现旧的锁文件但进程已不存在，正在清理...');
@@ -82,11 +113,22 @@ export class ProcessManager {
       }
 
       // 创建新的锁文件
-      fs.writeFileSync(LOCK_FILE, JSON.stringify({
-        pid: process.pid,
-        instanceId: this.instanceId,
-        timestamp: Date.now()
-      }));
+      if (isDocker) {
+        // 在容器内：使用唯一的锁文件名（基于实例ID）
+        const uniqueLockFile = `${LOCK_FILE}.${this.instanceId}`;
+        fs.writeFileSync(uniqueLockFile, JSON.stringify({
+          pid: process.pid,
+          instanceId: this.instanceId,
+          timestamp: Date.now()
+        }));
+      } else {
+        // 非容器环境：使用标准锁文件
+        fs.writeFileSync(LOCK_FILE, JSON.stringify({
+          pid: process.pid,
+          instanceId: this.instanceId,
+          timestamp: Date.now()
+        }));
+      }
 
       console.error('MCP-SSH进程锁创建成功');
       return true;

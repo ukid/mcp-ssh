@@ -78,6 +78,9 @@ export class SshMCP {
 
     let info = `${statusEmoji[connection.status as ConnectionStatus]} ${connection.name || connection.id}\n`;
     info += `ID: ${connection.id}\n`;
+    if (connection.config.serverName) {
+      info += `服务器名称: ${connection.config.serverName}\n`;
+    }
     info += `主机: ${connection.config.host}:${connection.config.port || 22}\n`;
     info += `用户名: ${connection.config.username}\n`;
     
@@ -175,45 +178,96 @@ export class SshMCP {
     // 创建新连接
     this.server.tool(
       "connect",
-      "Establishes a new SSH connection to a server.",
+      "Establishes a new SSH connection to a server. Can connect by connectionId (for saved connections) or by providing host and username.",
       {
-        host: z.string(),
+        connectionId: z.string().optional(),
+        host: z.string().optional(),
         port: z.number().optional(),
-        username: z.string(),
+        username: z.string().optional(),
         password: z.string().optional(),
         privateKey: z.string().optional(),
         passphrase: z.string().optional(),
         name: z.string().optional(),
+        serverName: z.string().optional(),
         rememberPassword: z.boolean().optional().default(true),
         tags: z.array(z.string()).optional()
       },
       async (params) => {
         try {
-          // 构建连接配置
-          const config: SSHConnectionConfig = {
-            host: params.host,
-            port: params.port || parseInt(process.env.DEFAULT_SSH_PORT || '22'),
-            username: params.username,
-            password: params.password,
-            keepaliveInterval: 60000,
-            readyTimeout: parseInt(process.env.CONNECTION_TIMEOUT || '10000'),
-            reconnect: true,
-            reconnectTries: parseInt(process.env.RECONNECT_ATTEMPTS || '3'),
-            reconnectDelay: 5000
-          };
+          let config: SSHConnectionConfig;
+          let connectionName: string | undefined = params.name;
+          let connectionTags: string[] | undefined = params.tags;
           
-          // 如果提供了私钥，优先使用私钥认证
-          if (params.privateKey) {
-            config.privateKey = params.privateKey;
-            config.passphrase = params.passphrase;
+          // 如果提供了 connectionId，从已保存的连接中获取配置
+          if (params.connectionId) {
+            const savedConnection = this.sshService.getConnection(params.connectionId);
+            if (!savedConnection) {
+              return {
+                content: [{
+                  type: "text",
+                  text: `错误: 连接 ID ${params.connectionId} 不存在`
+                }],
+                isError: true
+              };
+            }
+            
+            // 使用已保存的连接配置
+            config = {
+              ...savedConnection.config,
+              // 允许覆盖部分配置
+              password: params.password || savedConnection.config.password,
+              privateKey: params.privateKey || savedConnection.config.privateKey,
+              passphrase: params.passphrase || savedConnection.config.passphrase,
+              serverName: params.serverName || savedConnection.config.serverName,
+              keepaliveInterval: 60000,
+              readyTimeout: parseInt(process.env.CONNECTION_TIMEOUT || '10000'),
+              reconnect: true,
+              reconnectTries: parseInt(process.env.RECONNECT_ATTEMPTS || '3'),
+              reconnectDelay: 5000
+            };
+            
+            // 使用已保存的连接名称和标签（如果未提供新的）
+            connectionName = connectionName || savedConnection.name;
+            connectionTags = connectionTags || savedConnection.tags;
+          } else {
+            // 如果没有提供 connectionId，则必须提供 host 和 username
+            if (!params.host || !params.username) {
+              return {
+                content: [{
+                  type: "text",
+                  text: `错误: 必须提供 connectionId 或同时提供 host 和 username`
+                }],
+                isError: true
+              };
+            }
+            
+            // 构建连接配置
+            config = {
+              host: params.host,
+              port: params.port || parseInt(process.env.DEFAULT_SSH_PORT || '22'),
+              username: params.username,
+              password: params.password,
+              serverName: params.serverName,
+              keepaliveInterval: 60000,
+              readyTimeout: parseInt(process.env.CONNECTION_TIMEOUT || '10000'),
+              reconnect: true,
+              reconnectTries: parseInt(process.env.RECONNECT_ATTEMPTS || '3'),
+              reconnectDelay: 5000
+            };
+            
+            // 如果提供了私钥，优先使用私钥认证
+            if (params.privateKey) {
+              config.privateKey = params.privateKey;
+              config.passphrase = params.passphrase;
+            }
           }
           
           // 连接到服务器
           const connection = await this.sshService.connect(
             config, 
-            params.name, 
+            connectionName, 
             params.rememberPassword,
-            params.tags
+            connectionTags
           );
           
           // 记录活跃连接
@@ -367,6 +421,66 @@ export class SshMCP {
             content: [{
               type: "text",
               text: `获取连接详情出错: ${error instanceof Error ? error.message : String(error)}`
+            }],
+            isError: true
+          };
+        }
+      }
+    );
+    
+    // 更新连接
+    this.server.tool(
+      "updateConnection",
+      "Updates a saved SSH connection's name, serverName, or tags.",
+      {
+        connectionId: z.string(),
+        name: z.string().optional(),
+        serverName: z.string().optional(),
+        tags: z.array(z.string()).optional()
+      },
+      async ({ connectionId, name, serverName, tags }) => {
+        try {
+          const connection = this.sshService.getConnection(connectionId);
+          
+          if (!connection) {
+            return {
+              content: [{
+                type: "text",
+                text: `错误: 连接 ${connectionId} 不存在`
+              }],
+              isError: true
+            };
+          }
+          
+          const updates: { name?: string; serverName?: string; tags?: string[] } = {};
+          if (name !== undefined) updates.name = name;
+          if (serverName !== undefined) updates.serverName = serverName;
+          if (tags !== undefined) updates.tags = tags;
+          
+          const success = await this.sshService.updateConnection(connectionId, updates);
+          
+          if (success) {
+            const updatedConnection = this.sshService.getConnection(connectionId);
+            return {
+              content: [{
+                type: "text",
+                text: `已成功更新连接信息!\n\n${this.formatConnectionInfo(updatedConnection!)}`
+              }]
+            };
+          } else {
+            return {
+              content: [{
+                type: "text",
+                text: `更新连接失败`
+              }],
+              isError: true
+            };
+          }
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `更新连接时出错: ${error instanceof Error ? error.message : String(error)}`
             }],
             isError: true
           };

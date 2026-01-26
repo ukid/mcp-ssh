@@ -37,4 +37,4 @@ RUN mkdir -p /root/.ssh && \
     chmod 700 /root/.ssh
 
 # 运行启动脚本
-CMD ["python3", "bridging_ssh_mcp.py"] 
+CMD ["sleep", "infinity"] 

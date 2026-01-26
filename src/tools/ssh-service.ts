@@ -19,6 +19,7 @@ export interface SSHConnectionConfig {
   password?: string;
   privateKey?: string;
   passphrase?: string;
+  serverName?: string;
   keepaliveInterval?: number;
   readyTimeout?: number;
   reconnect?: boolean;
@@ -258,6 +259,7 @@ export class SSHService {
           port: config.port || parseInt(process.env.DEFAULT_SSH_PORT || '22'),
           username: config.username,
           privateKey: config.privateKey,
+          serverName: config.serverName,
           keepaliveInterval: 60000,
           readyTimeout: parseInt(process.env.CONNECTION_TIMEOUT || '10000')
         },
@@ -292,7 +294,8 @@ export class SSHService {
         host: connection.config.host,
         port: connection.config.port,
         username: connection.config.username,
-        privateKey: connection.config.privateKey
+        privateKey: connection.config.privateKey,
+        serverName: connection.config.serverName
       },
       lastUsed: connection.lastUsed ? connection.lastUsed.toISOString() : new Date().toISOString(),
       tags: connection.tags || []
@@ -602,6 +605,32 @@ export class SSHService {
   // 获取特定连接
   public getConnection(connectionId: string): SSHConnection | undefined {
     return this.connections.get(connectionId);
+  }
+  
+  // 更新连接信息
+  public async updateConnection(connectionId: string, updates: { name?: string; serverName?: string; tags?: string[] }): Promise<boolean> {
+    await this.ensureReady();
+    
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      return false;
+    }
+    
+    // 更新内存中的连接信息
+    if (updates.name !== undefined) {
+      connection.name = updates.name;
+    }
+    if (updates.serverName !== undefined) {
+      connection.config.serverName = updates.serverName;
+    }
+    if (updates.tags !== undefined) {
+      connection.tags = updates.tags;
+    }
+    
+    // 保存到数据库
+    await this.saveConnection(connection);
+    
+    return true;
   }
   
   // 执行命令
